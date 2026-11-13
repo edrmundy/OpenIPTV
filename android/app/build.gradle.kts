@@ -2,6 +2,7 @@ import java.util.Properties
 
 plugins {
     id("com.android.application")
+    id("org.jetbrains.kotlin.android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
@@ -18,6 +19,8 @@ val keystoreProperties = Properties().apply {
 val hasReleaseKey = keystoreProperties.getProperty("storeFile") != null
 
 android {
+    // Temporary diagnostic build: skip expensive release lint analysis.
+    lint { checkReleaseBuilds = false }
     namespace = "com.openiptv.app"
     compileSdk = 36
     // Pinned: the OpenVPN native build is tested with this NDK.
@@ -33,12 +36,15 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.openiptv.app"
+        applicationIdSuffix = ".diagnostic"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Fire TV is 32-bit ARM only; keep the diagnostic native library compatible.
+        ndk { abiFilters += listOf("armeabi-v7a") }
 
         // Built-in OpenVPN (Power User Tools, #41): OpenVPN 3 core + mbed TLS,
         // compiled from pinned sources fetched by android/openvpn-deps.sh.

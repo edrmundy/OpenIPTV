@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:open_iptv/core/models/profile.dart';
 import 'package:open_iptv/core/services/category_order.dart';
+import 'package:open_iptv/core/services/edtv_queue_bridge.dart';
 import 'package:open_iptv/core/storage/database.dart';
 import 'package:open_iptv/core/storage/preferences.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
@@ -118,7 +119,11 @@ class ProfileService {
       if (pin == null || _hashPin(pin) != profile.pinHash) return false;
     }
 
-    await prefs?.setActiveProfileId(id);
+    final currentPrefs = prefs;
+    await currentPrefs?.setActiveProfileId(id);
+    if (currentPrefs != null) {
+      await EdtvQueueBridge.publish(db, profile, currentPrefs);
+    }
     return true;
   }
 

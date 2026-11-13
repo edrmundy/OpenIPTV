@@ -35,6 +35,55 @@ object EngineChannels {
     private fun attach(binding: FlutterPlugin.FlutterPluginBinding) {
         val context = binding.applicationContext
         val messenger = binding.binaryMessenger
+        // EdTV launcher bridge: playback metadata only, never credentials or stream URLs.
+        MethodChannel(messenger, "openiptv/edtv").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "takePendingResume" -> {
+                    val prefs = context.getSharedPreferences("edtv_bridge", Context.MODE_PRIVATE)
+                    val raw = prefs.getString("pending_resume", null)
+                    prefs.edit().remove("pending_resume").apply()
+                    if (raw == null) {
+                        result.success(null)
+                    } else {
+                        try {
+                            val data = org.json.JSONObject(raw)
+                            result.success(mapOf(
+                                "contentId" to data.optString("contentId"),
+                                "contentType" to data.optString("contentType"),
+                                "seriesId" to data.optString("seriesId").takeIf { it.isNotEmpty() },
+                                "resumePositionMs" to data.optLong("resumePositionMs", 0L),
+                            ))
+                        } catch (_: Exception) {
+                            result.success(null)
+                        }
+                    }
+                }
+                "publishQueueSnapshot" -> {
+                    val raw = call.arguments as? String
+                    if (raw.isNullOrBlank()) {
+                        result.error("bad_arguments", "Queue snapshot missing", null)
+                    } else {
+                        try {
+                            val data = org.json.JSONObject(raw)
+                            if (data.optInt("apiVersion") != 1) {
+                                result.error("bad_version", "Unsupported queue snapshot", null)
+                            } else {
+                                context.getSharedPreferences("edtv_bridge", Context.MODE_PRIVATE)
+                                    .edit()
+                                    .putString("queue_snapshot", raw)
+                                    .putLong("queue_snapshot_updated_at", data.optLong("updatedAt", 0L))
+                                    .apply()
+                                result.success(null)
+                            }
+                        } catch (_: Exception) {
+                            result.error("bad_arguments", "Invalid queue snapshot", null)
+                        }
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+
         MethodChannel(messenger, "openiptv/device").setMethodCallHandler { call, result ->
             when (call.method) {
                 "isTelevision" -> result.success(isTelevision(context))

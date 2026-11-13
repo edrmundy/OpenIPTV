@@ -134,8 +134,8 @@ class NowPlayingHandler extends BaseAudioHandler {
   }
 
   void _broadcastState() {
-    if (!_publishing || _stopped || _carError != null) return;
     final state = _playbackService.lastState;
+    if (!_publishing || _stopped || _carError != null) return;
     // A movie / episode's length is only known once it starts playing:
     // update the item so the car shows the real total time.
     final item = _lastMediaItem;

@@ -12,6 +12,7 @@ import 'package:open_iptv/app.dart';
 import 'package:open_iptv/core/services/auto_refresh_service.dart';
 import 'package:open_iptv/core/services/car_library.dart';
 import 'package:open_iptv/core/services/epg_service.dart';
+import 'package:open_iptv/core/services/edtv_queue_bridge.dart';
 import 'package:open_iptv/core/services/now_playing_service.dart';
 import 'package:open_iptv/core/services/playback_service.dart';
 import 'package:open_iptv/core/services/profile_service.dart';
@@ -26,7 +27,8 @@ void main() async {
   Telemetry.install();
   // Increase image cache to handle large libraries (Movies/Series/Live TV).
   PaintingBinding.instance.imageCache.maximumSize = 2000;
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 200 * 1024 * 1024; // 200MB
+  PaintingBinding.instance.imageCache.maximumSizeBytes =
+      200 * 1024 * 1024; // 200MB
   // Must resolve before the orientation lock below — a TV has no rotation
   // concept and no portrait mode at all, so requesting one here causes
   // Android to letterbox the whole app into a small portrait compat box.
@@ -78,6 +80,19 @@ void main() async {
       child: const OpenIPTVApp(),
     ),
   );
+  if (PlatformHelper.isTVDevice) {
+    unawaited(() async {
+      final profile = await container.read(activeProfileProvider.future);
+      final prefs = await container.read(appPreferencesProvider.future);
+      if (profile == null) {
+        await EdtvQueueBridge.clear();
+      } else {
+        await EdtvQueueBridge.publish(
+            container.read(appDatabaseProvider), profile, prefs);
+      }
+    }());
+  }
   // Well after the first frame: pick up a native crash and send what waits.
-  unawaited(Future<void>.delayed(const Duration(seconds: 20), Telemetry.startup));
+  unawaited(
+      Future<void>.delayed(const Duration(seconds: 20), Telemetry.startup));
 }

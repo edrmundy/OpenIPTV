@@ -1,7 +1,7 @@
 import 'dart:ffi';
 import 'dart:io';
 
-import 'package:drift/drift.dart' hide isNull;
+import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:open_iptv/core/storage/database.dart';
@@ -10,7 +10,8 @@ import 'package:sqlite3/open.dart';
 void main() {
   // Linux hosts often ship only the versioned runtime library (no -dev
   // symlink), which package:sqlite3 won't find by default.
-  if (Platform.isLinux && File('/lib/x86_64-linux-gnu/libsqlite3.so.0').existsSync()) {
+  if (Platform.isLinux &&
+      File('/lib/x86_64-linux-gnu/libsqlite3.so.0').existsSync()) {
     open.overrideFor(
         OperatingSystem.linux, () => DynamicLibrary.open('libsqlite3.so.0'));
   }
@@ -47,6 +48,53 @@ void main() {
   Future<List<String>> remaining() async =>
       [for (final p in await db.select(db.programmes).get()) p.title]..sort();
 
+  test('resume queues expose their per-profile last activity time', () async {
+    final movieAt = DateTime.utc(2026, 11, 13, 12, 30);
+    await db.into(db.movies).insert(MoviesCompanion.insert(
+          id: 'movie',
+          sourceId: 'src',
+          title: 'Movie',
+          streamUrl: 'http://movie',
+        ));
+    await db.into(db.episodes).insert(EpisodesCompanion.insert(
+          id: 'episode',
+          seriesId: 'series',
+          sourceId: 'src',
+          season: 1,
+          episode: 2,
+          title: 'Episode',
+          streamUrl: 'http://episode',
+        ));
+    await db.into(db.watchProgress).insert(WatchProgressCompanion.insert(
+          profileId: 'profile',
+          contentId: 'movie',
+          contentType: 'movie',
+          watchedDurationSeconds: const Value(120),
+          totalDurationSeconds: const Value(3600),
+          lastWatchedAt: Value(movieAt),
+        ));
+    await db.into(db.watchProgress).insert(WatchProgressCompanion.insert(
+          profileId: 'profile',
+          contentId: 'episode',
+          contentType: 'episode',
+          watchedDurationSeconds: const Value(240),
+          totalDurationSeconds: const Value(1800),
+          lastWatchedAt: Value(movieAt.add(const Duration(minutes: 1))),
+        ));
+
+    final movies = await db.watchMoviesInProgress('profile').first;
+    final episodes = await db.watchEpisodesInProgress('profile').first;
+    expect(movies.single.lastWatchedAt?.millisecondsSinceEpoch,
+        movieAt.millisecondsSinceEpoch);
+    expect(episodes.single.lastWatchedAt?.millisecondsSinceEpoch,
+        movieAt.add(const Duration(minutes: 1)).millisecondsSinceEpoch);
+
+    await channel('recent');
+    await db.updateChannelLastWatched('profile', 'recent');
+    final channels = await db.watchRecentChannels('profile').first;
+    expect(channels.single.lastWatchedAt, isNotNull);
+  });
+
   test('deleteOldProgrammes keeps each channel\'s catch-up window', () async {
     await channel('plain');
     await channel('cu1', catchupDays: 1);
@@ -70,15 +118,17 @@ void main() {
     await programme('a', const Duration(hours: 3)); // ended 3 h ago
     await programme('b', const Duration(minutes: -30));
 
-    final result = await db.getProgrammesForChannelInRange('a',
-        now.subtract(const Duration(hours: 1)), now.add(const Duration(hours: 1)));
+    final result = await db.getProgrammesForChannelInRange(
+        'a',
+        now.subtract(const Duration(hours: 1)),
+        now.add(const Duration(hours: 1)));
 
     expect(result.map((p) => p.title), ['a 0h']);
   });
 
   test('searchCurrentProgrammes finds only what is airing now', () async {
-    Future<void> show(String channelId, String title, Duration from,
-            Duration to) =>
+    Future<void> show(
+            String channelId, String title, Duration from, Duration to) =>
         db.into(db.programmes).insert(ProgrammesCompanion.insert(
               channelId: channelId,
               start: now.add(from),
@@ -91,12 +141,11 @@ void main() {
         const Duration(hours: 2)); // later
     await show('c', 'Old Simpsons', const Duration(hours: -2),
         const Duration(hours: -1)); // over
-    await show('d', 'News', const Duration(minutes: -5),
-        const Duration(minutes: 5));
+    await show(
+        'd', 'News', const Duration(minutes: -5), const Duration(minutes: 5));
 
     final found = await db.searchCurrentProgrammes('SIMPSON');
-    expect(found.map((p) => (p.channelId, p.title)),
-        [('a', 'The Simpsons')]);
+    expect(found.map((p) => (p.channelId, p.title)), [('a', 'The Simpsons')]);
   });
 
   test('removing a playlist also removes its guide', () async {
@@ -180,8 +229,7 @@ void main() {
       await ahead('src_ch_1', const Duration(hours: 30));
       await ahead('src_ch_1', const Duration(hours: 80));
       await db.deleteProgrammesStartingAfter(now.add(const Duration(days: 2)));
-      expect(await remaining(),
-          ['src_ch_1 in 2h', 'src_ch_1 in 30h']);
+      expect(await remaining(), ['src_ch_1 in 2h', 'src_ch_1 in 30h']);
     });
 
     test('clearProgrammeDescriptions keeps titles and times', () async {

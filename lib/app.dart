@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -17,6 +18,7 @@ import 'package:open_iptv/core/services/playback_service.dart';
 import 'package:open_iptv/core/services/vpn_service.dart';
 import 'package:open_iptv/core/services/epg_service.dart';
 import 'package:open_iptv/core/services/device_info_channel.dart';
+import 'package:open_iptv/core/services/edtv_queue_bridge.dart';
 import 'package:open_iptv/core/services/profile_service.dart';
 import 'package:open_iptv/core/storage/database.dart';
 import 'package:open_iptv/core/services/native_video_player.dart';
@@ -66,11 +68,24 @@ class _OpenIPTVAppState extends ConsumerState<OpenIPTVApp> {
   // True while multiple profiles exist and the user hasn't picked one yet
   // this session.
   bool _needsProfilePick = false;
+  bool _consumingEdtvResume = false;
+  static const MethodChannel _edtvBridge = MethodChannel('openiptv/edtv');
 
   @override
   void initState() {
     super.initState();
     _router = _buildRouter();
+    _edtvBridge.setMethodCallHandler((call) async {
+      if (call.method == 'pendingResumeAvailable' &&
+          _dbReady &&
+          !_needsProfilePick &&
+          defaultTargetPlatform == TargetPlatform.android) {
+        await _consumeEdtvResume(ref.read(appDatabaseProvider));
+      } else if (call.method == 'edtvBackPressed' &&
+          PlayerScreen.openCount > 0) {
+        ref.read(homeLeaveProvider.notifier).state++;
+      }
+    });
     _openDb();
     // A tunneling / passthrough failure (#159) turns that setting Off for
     // good, so it isn't tried again until the user switches it back on.
@@ -107,6 +122,7 @@ class _OpenIPTVAppState extends ConsumerState<OpenIPTVApp> {
 
     final db = ref.read(appDatabaseProvider);
     final prefs = await ref.read(appPreferencesProvider.future);
+    final sources = await db.getAllSources();
 
     // Re-sync the background auto-refresh registration against the
     // persisted interval — WorkManager can drop periodic registrations
@@ -130,19 +146,22 @@ class _OpenIPTVAppState extends ConsumerState<OpenIPTVApp> {
           ref.read(pipActiveProvider.notifier).state = isInPip,
       // The PiP window was closed: stop what was playing in it.
       onPipDismissed: () => ref.read(homeLeaveProvider.notifier).state++,
-      onUserLeft: () {
+      onUserLeft: (forceStop) {
         // Picture-in-Picture off: Home stops playback. With PiP on and no
         // overlay open, native enters PiP and never reports this.
         // But when a transient overlay (channel switcher, multi-view) is
         // open PiP is suppressed — fall through to normal Home behavior so
         // the stream is killed instead of playing silently in the background.
-        if (ref.read(pipEnabledProvider) &&
+        if (!forceStop &&
+            ref.read(pipEnabledProvider) &&
             !ref.read(playerOverlayOpenProvider)) {
           return;
         }
         if (!ref.read(playbackServiceProvider).lastState.playWhenReady) return;
         if (ref.read(castServiceProvider).status.connected) return;
-        ref.read(homeLeaveProvider.notifier).state++;
+        ProviderScope.containerOf(context)
+            .read(homeLeaveProvider.notifier)
+            .state++;
       },
     );
     void pushPipAvailability() {
@@ -166,10 +185,12 @@ class _OpenIPTVAppState extends ConsumerState<OpenIPTVApp> {
         .stateStream
         .listen((_) => pushPipAvailability());
     // Re-evaluate PiP eligibility when the user toggles the setting.
-    ref.listen<bool>(pipEnabledProvider, (_, __) => pushPipAvailability());
+    ref.listenManual<bool>(
+        pipEnabledProvider, (_, __) => pushPipAvailability());
     // Re-evaluate when a transient overlay (channel switcher, multi-view)
     // opens or closes — opening suppresses PiP, closing re-enables it.
-    ref.listen<bool>(playerOverlayOpenProvider, (_, __) => pushPipAvailability());
+    ref.listenManual<bool>(
+        playerOverlayOpenProvider, (_, __) => pushPipAvailability());
 
     // Well after start (counting the big tables takes seconds on a TV):
     // report storage, then the one-time rebuild of an older, bloated file.
@@ -196,6 +217,74 @@ class _OpenIPTVAppState extends ConsumerState<OpenIPTVApp> {
         _dbReady = true;
         _needsProfilePick = needsPick;
       });
+      if (!needsPick &&
+          sources.isNotEmpty &&
+          defaultTargetPlatform == TargetPlatform.android) {
+        unawaited(_consumeEdtvResume(db));
+      }
+    }
+  }
+
+  Future<void> _consumeEdtvResume(AppDatabase db) async {
+    if (_consumingEdtvResume) return;
+    _consumingEdtvResume = true;
+    try {
+      final request = await _edtvBridge
+          .invokeMapMethod<String, dynamic>('takePendingResume');
+      if (!mounted || request == null) return;
+      final id = request['contentId'] as String?;
+      final type = request['contentType'] as String?;
+      var positionMs = (request['resumePositionMs'] as num?)?.toInt() ?? 0;
+      if (id == null || id.isEmpty) return;
+      String? streamUrl;
+      String? title;
+      String? seriesId;
+      switch (type) {
+        case 'live':
+          final channel = await db.getChannelById(id);
+          streamUrl = channel?.streamUrl;
+          title = channel?.name;
+        case 'movie':
+          final movie = await db.watchMovieById(id).first;
+          streamUrl = movie?.streamUrl;
+          title = movie?.title;
+          positionMs = [
+            positionMs,
+            (movie?.watchedDuration?.inMilliseconds ?? 0)
+          ].reduce((a, b) => a > b ? a : b);
+        case 'episode':
+          final episode = await db.getEpisodeById(id);
+          if (episode != null) {
+            final series = await db.getSeriesById(episode.seriesId);
+            streamUrl = episode.streamUrl;
+            title = '${series?.title ?? 'Series'} - ${episode.displayTitle}';
+            seriesId = episode.seriesId;
+            positionMs = [
+              positionMs,
+              (episode.watchedDuration?.inMilliseconds ?? 0)
+            ].reduce((a, b) => a > b ? a : b);
+          }
+      }
+      if (!mounted || streamUrl == null || title == null || type == null)
+        return;
+      debugPrint('[OTV-edtv] resume $type id=$id at ${positionMs}ms');
+      PlayerScreen.edtvLaunched = true;
+      final extra = {
+        'streamUrl': streamUrl,
+        'title': title,
+        'contentId': id,
+        'contentType': type,
+        'seriesId': seriesId ?? request['seriesId'] as String?,
+        'resumePosition': type == 'live' || positionMs <= 0
+            ? null
+            : Duration(milliseconds: positionMs),
+        'confirmResume': false,
+      };
+      _router.go('/player', extra: extra);
+    } catch (error) {
+      debugPrint('[OTV-edtv] resume request failed: $error');
+    } finally {
+      _consumingEdtvResume = false;
     }
   }
 
@@ -418,7 +507,12 @@ class _OpenIPTVAppState extends ConsumerState<OpenIPTVApp> {
         darkTheme: AppTheme.dark(accent),
         themeMode: ThemeMode.dark,
         home: ProfilePickerScreen(
-          onPicked: () => setState(() => _needsProfilePick = false),
+          onPicked: () {
+            setState(() => _needsProfilePick = false);
+            if (defaultTargetPlatform == TargetPlatform.android) {
+              unawaited(_consumeEdtvResume(ref.read(appDatabaseProvider)));
+            }
+          },
         ),
       );
     }
@@ -441,18 +535,18 @@ class _OpenIPTVAppState extends ConsumerState<OpenIPTVApp> {
                     ref.watch(fontScaleProvider)),
           ),
           child: ChannelNames(
-          names: ref.watch(channelCustomProvider.select((c) => c.names)),
-          child: ImageQuality(
-          full: ref.watch(fullResImagesProvider),
-          child: DisplayNames(
-            enabled: ref.watch(cleanNamesProvider),
-            child: TvKeyboardInset(
-              child:
-                  TvTextFieldEscape(child: child ?? const SizedBox.shrink()),
+            names: ref.watch(channelCustomProvider.select((c) => c.names)),
+            child: ImageQuality(
+              full: ref.watch(fullResImagesProvider),
+              child: DisplayNames(
+                enabled: ref.watch(cleanNamesProvider),
+                child: TvKeyboardInset(
+                  child: TvTextFieldEscape(
+                      child: child ?? const SizedBox.shrink()),
+                ),
+              ),
             ),
           ),
-        ),
-        ),
         ),
       ),
     );
@@ -543,6 +637,26 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) _checkForUpdate();
+    if (PlatformHelper.isTVDevice &&
+        (state == AppLifecycleState.resumed ||
+            state == AppLifecycleState.paused)) {
+      _publishEdtvQueueSnapshot();
+    }
+  }
+
+  void _publishEdtvQueueSnapshot() {
+    if (!mounted) return;
+    final container = ProviderScope.containerOf(context);
+    unawaited(() async {
+      final profile = await container.read(activeProfileProvider.future);
+      final prefs = await container.read(appPreferencesProvider.future);
+      if (profile == null) {
+        await EdtvQueueBridge.clear();
+      } else {
+        await EdtvQueueBridge.publish(
+            container.read(appDatabaseProvider), profile, prefs);
+      }
+    }());
   }
 
   void _checkForUpdate() {
@@ -634,6 +748,17 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
         return;
       }
     }
+    // An EDTV resume intent can make /player the router's root route, with
+    // no Navigator entry to pop. Sending Back to Android in that case closes
+    // the Activity before Flutter's PopScope can stop the native video layer.
+    // Route it through the player's normal stop-and-return path instead.
+    if (PlayerScreen.openCount > 0) {
+      ProviderScope.containerOf(context)
+          .read(homeLeaveProvider.notifier)
+          .state++;
+      return;
+    }
+
     // Not on a tab root and nothing left to close: an ordinary page, so the
     // system's Back (go_router) takes it.
     final location = GoRouterState.of(context).uri.path;
@@ -721,8 +846,8 @@ class _ShellState extends State<_Shell> with WidgetsBindingObserver {
                 child: ValueListenableBuilder<bool>(
                   valueListenable: TvGuideScreen.railCompact,
                   builder: (context, compact, child) {
-                    final w = MediaQuery.sizeOf(context).width -
-                        (compact ? 64 : 96);
+                    final w =
+                        MediaQuery.sizeOf(context).width - (compact ? 64 : 96);
                     return ClipRect(
                       child: OverflowBox(
                         alignment: Alignment.centerLeft,
@@ -881,48 +1006,48 @@ class _TvNavRailState extends State<_TvNavRail> {
       skipTraversal: true,
       onKeyEvent: _onKey,
       child: ValueListenableBuilder<bool>(
-       valueListenable: TvGuideScreen.railCompact,
-       builder: (context, compact, _) => AnimatedContainer(
-        duration: motionDuration(TvGuideScreen.shiftDuration),
-        curve: TvGuideScreen.shiftCurve,
-        width: compact ? 64 : 96,
-        color: theme.colorScheme.surface,
-        child: SafeArea(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              for (var i = 0; i < _kNavDestinations.length; i++)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6),
-                  child: _TvNavRailItem(
-                    icon: _kNavDestinations[i].icon,
-                    label: _kNavDestinations[i].label,
-                    active: i == index,
-                    compact: compact,
-                    // Only the very first item auto-claims focus, and only on
-                    // the rail's initial mount (cold app start, landing on
-                    // Live TV) — NOT `i == index`, which would re-fire
-                    // autofocus on every navigation.
-                    autofocus: i == 0,
-                    focusNode: widget.nodes[i],
-                    onTap: () {
-                      // Picking a tab hands the remote to that page: drop
-                      // focus so its first item's autofocus takes it.
-                      widget.onSelect();
-                      FocusManager.instance.primaryFocus?.unfocus();
-                      context.go(_kNavDestinations[i].path);
-                      if (i == 0) {
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          TvGuideScreen.requestCategoryFocus?.call();
-                        });
-                      }
-                    },
+        valueListenable: TvGuideScreen.railCompact,
+        builder: (context, compact, _) => AnimatedContainer(
+          duration: motionDuration(TvGuideScreen.shiftDuration),
+          curve: TvGuideScreen.shiftCurve,
+          width: compact ? 64 : 96,
+          color: theme.colorScheme.surface,
+          child: SafeArea(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                for (var i = 0; i < _kNavDestinations.length; i++)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: _TvNavRailItem(
+                      icon: _kNavDestinations[i].icon,
+                      label: _kNavDestinations[i].label,
+                      active: i == index,
+                      compact: compact,
+                      // Only the very first item auto-claims focus, and only on
+                      // the rail's initial mount (cold app start, landing on
+                      // Live TV) — NOT `i == index`, which would re-fire
+                      // autofocus on every navigation.
+                      autofocus: i == 0,
+                      focusNode: widget.nodes[i],
+                      onTap: () {
+                        // Picking a tab hands the remote to that page: drop
+                        // focus so its first item's autofocus takes it.
+                        widget.onSelect();
+                        FocusManager.instance.primaryFocus?.unfocus();
+                        context.go(_kNavDestinations[i].path);
+                        if (i == 0) {
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            TvGuideScreen.requestCategoryFocus?.call();
+                          });
+                        }
+                      },
+                    ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         ),
-       ),
       ),
     );
   }

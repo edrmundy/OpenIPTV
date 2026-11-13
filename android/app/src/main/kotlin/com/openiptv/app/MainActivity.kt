@@ -17,6 +17,7 @@ import io.flutter.embedding.android.RenderMode
 import io.flutter.embedding.android.TransparencyMode
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
 
 // Extends AudioServiceActivity (not FlutterActivity) so the Flutter engine is
 // shared with the background audio_service, keeping the Now Playing
@@ -25,6 +26,9 @@ class MainActivity : AudioServiceActivity() {
     private var pipChannel: MethodChannel? = null
     private var backChannel: MethodChannel? = null
     private var updatesChannel: MethodChannel? = null
+    private var edtvChannel: MethodChannel? = null
+    private var edtvActivityChannel: MethodChannel? = null
+    private var edtvLaunched = false
     private var castController: CastController? = null
     private var vpnController: VpnController? = null
 
@@ -58,13 +62,53 @@ class MainActivity : AudioServiceActivity() {
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
+        captureEdtvResume(intent)
         VideoLayerMode.activeAtStart = videoLayerDevice
         if (videoLayerDevice) VideoLayer.attach(this)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureEdtvResume(intent)
+        edtvChannel?.invokeMethod("pendingResumeAvailable", null)
+    }
+
+    private fun captureEdtvResume(intent: Intent?) {
+        if (intent?.action != "com.openiptv.app.EDTV_RESUME") return
+        edtvLaunched = true
+        val id = intent.getStringExtra("contentId") ?: return
+        val type = intent.getStringExtra("contentType") ?: return
+        if (type !in setOf("live", "movie", "episode")) return
+        val payload = JSONObject()
+            .put("contentId", id)
+            .put("contentType", type)
+            .put("seriesId", intent.getStringExtra("seriesId"))
+            .put("resumePositionMs", intent.getLongExtra("resumePositionMs", 0L).coerceAtLeast(0L))
+        getSharedPreferences("edtv_bridge", Context.MODE_PRIVATE).edit()
+            .putString("pending_resume", payload.toString())
+            .apply()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         FrameRateMatcher.attach(this)
         super.configureFlutterEngine(flutterEngine)
+        edtvChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "openiptv/edtv")
+        edtvActivityChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger, "openiptv/edtv_activity",
+        )
+        edtvActivityChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "finishEdtvLaunch" -> {
+                    if (edtvLaunched) {
+                        edtvLaunched = false
+                        finish()
+                    }
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
         pipChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "openiptv/pip")
         pipChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
@@ -157,7 +201,13 @@ class MainActivity : AudioServiceActivity() {
 
     @Suppress("DEPRECATION", "MissingSuperCall")
     override fun onBackPressed() {
-        if (backBlocked) {
+        if (edtvLaunched) {
+            // An EDTV resume intent opens the player as the router's root
+            // route, outside the shell that normally intercepts Back. Never
+            // finish this transparent Activity before Dart has stopped the
+            // player and its media session.
+            edtvChannel?.invokeMethod("edtvBackPressed", null)
+        } else if (backBlocked) {
             backChannel?.invokeMethod("backPressed", null)
         } else {
             super.onBackPressed()
@@ -179,7 +229,12 @@ class MainActivity : AudioServiceActivity() {
     // while it's in the foreground.
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && pipAvailable) {
+        if (videoLayerDevice) {
+            // Fire TV's launcher Home key should return to EdTV, not leave a
+            // silent/background player running or create a PiP session.
+            NativeVideoPlayerManager.stopAll()
+            pipChannel?.invokeMethod("userLeft", true)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && pipAvailable) {
             val params = PictureInPictureParams.Builder()
                 .setAspectRatio(Rational(16, 9))
                 .build()
