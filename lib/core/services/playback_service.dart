@@ -273,6 +273,15 @@ class PlaybackService {
     if (prefs != null) await EdtvQueueBridge.publishForProfile(db, profileId, prefs);
   }
 
+  /// Remembers the picture size the player decoded for [itemId], so the EDTV
+  /// launcher can label the card HD or UHD. Skipped while no picture is up.
+  Future<void> _rememberVideoSize(String itemId) async {
+    final state = _lastState;
+    final prefs = _prefsGetter();
+    if (prefs == null || state.videoWidth <= 0 || state.videoHeight <= 0) return;
+    await prefs.setVideoSize(itemId, state.videoWidth, state.videoHeight);
+  }
+
   Future<void> saveMovieProgress(
       String profileId, String movieId, Duration position, Duration total) async {
     debugPrint('[OTV-save] saveMovieProgress: pos=${position.inSeconds}s total=${total.inSeconds}s');
@@ -281,6 +290,7 @@ class PlaybackService {
       return;
     }
     await db.updateMovieProgress(profileId, movieId, position, total);
+    await _rememberVideoSize(movieId);
     await _publishEdtvQueue(profileId);
     debugPrint('[OTV-save] updateMovieProgress done');
   }
@@ -293,6 +303,7 @@ class PlaybackService {
       return;
     }
     await db.updateEpisodeProgress(profileId, episodeId, position, total);
+    await _rememberVideoSize(episodeId);
     await _publishEdtvQueue(profileId);
     debugPrint('[OTV-save] updateEpisodeProgress done');
   }
