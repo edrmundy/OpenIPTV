@@ -1,0 +1,164 @@
+# Fork-only. Keeps the EDTV bridge build in step with upstream OpenIPTV.
+#
+# Once a day (or by hand), it checks for a new upstream release. When there is
+# one, it replays the commits of the `edtv/bridge` branch onto that release,
+# runs the tests, builds the ARMv7 APK signed with the same key as the build
+# on the TV, and publishes it as a release named `edtv-<upstream tag>`.
+#
+# A rebase conflict or a failed check fails the run instead (GitHub emails the
+# owner), with the details in the run summary, and nothing is published. Installing on the TV stays a local step (EDTV's
+# scripts/openiptv-update.sh).
+#
+# Secret: EDTV_SIGNING_KEYSTORE_B64 is the base64 of the debug keystore that
+# signed the installed app (standard debug alias and passwords).
+name: EDTV bridge build
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if a release for the upstream tag already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: edtv-bridge
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: Hunter-Clipper/OpenIPTV
+  BRIDGE: edtv/bridge
+  # SHA-256 of the signing certificate of the app installed on the TV.
+  EXPECTED_CERT: 8ddcd2ad5df4e4566e21560127fca4fd823579bad4a5352c51c2179bdf12c7b8
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out the bridge branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRIDGE }}
+          fetch-depth: 0
+
+      - name: Decide what to build
+        id: plan
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch --quiet --tags upstream
+          latest=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          base=$(git describe --tags --abbrev=0 --match 'v*' HEAD)
+          release="edtv-$latest"
+          echo "upstream=$latest base=$base release=$release"
+          if gh release view "$release" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+              && [ "${{ inputs.force }}" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Release $release already exists; nothing to do."
+            exit 0
+          fi
+          {
+            echo "skip=false"
+            echo "latest=$latest"
+            echo "base=$base"
+            echo "release=$release"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Replay the bridge on the new release
+        if: steps.plan.outputs.skip == 'false' && steps.plan.outputs.base != steps.plan.outputs.latest
+        env:
+          LATEST: ${{ steps.plan.outputs.latest }}
+          BASE: ${{ steps.plan.outputs.base }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git rebase --onto "$LATEST" "$BASE"; then
+            files=$(git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/')
+            commit=$(git log -1 --format='%h %s' REBASE_HEAD 2>/dev/null || true)
+            git rebase --abort
+            printf '### The bridge does not replay on %s\n\nIt was on %s. Stopped at: %s\n\nConflicting files:\n%s\n' \
+              "$LATEST" "$BASE" "$commit" "$files" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          git log --oneline "$LATEST..HEAD"
+
+      - name: Set up Java
+        if: steps.plan.outputs.skip == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        if: steps.plan.outputs.skip == 'false'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Analyze and test
+        if: steps.plan.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          flutter --version
+          flutter pub get
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter test
+
+      - name: Build the signed APK
+        if: steps.plan.outputs.skip == 'false'
+        env:
+          KEYSTORE_B64: ${{ secrets.EDTV_SIGNING_KEYSTORE_B64 }}
+          RELEASE: ${{ steps.plan.outputs.release }}
+        run: |
+          set -euo pipefail
+          [ -n "$KEYSTORE_B64" ] || { echo "EDTV_SIGNING_KEYSTORE_B64 is not set"; exit 1; }
+          key="$RUNNER_TEMP/edtv-signing.keystore"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$key"
+          # Standard Android debug-key alias and passwords; the keystore itself is the secret.
+          printf 'storeFile=%s\nstorePassword=android\nkeyAlias=androiddebugkey\nkeyPassword=android\n' \
+            "$key" > android/key.properties
+          flutter build apk --release --target-platform android-arm
+          rm -f android/key.properties "$key"
+          apk="$RUNNER_TEMP/openiptv-$RELEASE-armv7.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "$apk"
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          cert=$("$bt/apksigner" verify --print-certs "$apk" \
+            | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)
+          if [ "$cert" != "$EXPECTED_CERT" ]; then
+            echo "Signed with the wrong key ($cert); it would not install over the TV's app."
+            exit 1
+          fi
+          pkg=$("$bt/aapt2" dump badging "$apk" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+          [ "$pkg" = "com.openiptv.app.diagnostic" ] || { echo "Unexpected package $pkg"; exit 1; }
+          (cd "$RUNNER_TEMP" && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256")
+          echo "APK=$apk" >> "$GITHUB_ENV"
+
+      - name: Publish the branch and the release
+        if: steps.plan.outputs.skip == 'false'
+        env:
+          LATEST: ${{ steps.plan.outputs.latest }}
+          BASE: ${{ steps.plan.outputs.base }}
+          RELEASE: ${{ steps.plan.outputs.release }}
+        run: |
+          set -euo pipefail
+          if [ "$BASE" != "$LATEST" ]; then
+            # Keep the previous bridge reachable for a rollback.
+            git tag -f "edtv-bridge-on-$BASE" "origin/$BRIDGE"
+            git push origin "refs/tags/edtv-bridge-on-$BASE"
+            git push --force-with-lease="$BRIDGE:origin/$BRIDGE" origin "HEAD:refs/heads/$BRIDGE"
+          fi
+          notes=$(printf 'Upstream %s with the EDTV bridge (fork-only).\n\nBridge commits:\n%s\n\n%s\n\nInstall on the TV with EDTV'"'"'s `scripts/openiptv-update.sh`.' \
+            "$LATEST" "$(git log --format='- %s' "$LATEST..HEAD")" "$(flutter --version | head -1)")
+          gh release delete "$RELEASE" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$RELEASE" "$APK" "$APK.sha256" \
+            --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
+            --title "OpenIPTV $LATEST + EDTV bridge" --notes "$notes"
