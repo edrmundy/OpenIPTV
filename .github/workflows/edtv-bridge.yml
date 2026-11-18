@@ -64,6 +64,10 @@ jobs:
 
       - name: Decide what to build
         id: plan
+        env:
+          IN_REF: ${{ inputs.ref }}
+          IN_BUILD: ${{ inputs.build_number }}
+          IN_FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
           git remote add upstream "https://github.com/$UPSTREAM.git"
@@ -71,15 +75,15 @@ jobs:
           latest=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
           base=$(git describe --tags --abbrev=0 --match 'v*' HEAD)
           release="edtv-$latest"
-          if [ -n "${{ inputs.ref }}" ]; then
+          if [ -n "${IN_REF:-}" ]; then
             # Rollback: build the given ref unchanged, under a new build number.
-            [ -n "${{ inputs.build_number }}" ] || { echo "A rollback needs build_number"; exit 1; }
+            [[ "${IN_BUILD:-}" =~ ^[0-9]+$ ]] || { echo "A rollback needs a numeric build_number"; exit 1; }
             latest=$base
-            release="edtv-rollback-${{ inputs.build_number }}"
+            release="edtv-rollback-$IN_BUILD"
           fi
           echo "upstream=$latest base=$base release=$release"
           if gh release view "$release" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-              && [ "${{ inputs.force }}" != "true" ]; then
+              && [ "${IN_FORCE:-false}" != "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Release $release already exists; nothing to do."
             exit 0
@@ -138,6 +142,7 @@ jobs:
         env:
           KEYSTORE_B64: ${{ secrets.EDTV_SIGNING_KEYSTORE_B64 }}
           RELEASE: ${{ steps.plan.outputs.release }}
+          IN_BUILD: ${{ inputs.build_number }}
         run: |
           set -euo pipefail
           [ -n "$KEYSTORE_B64" ] || { echo "EDTV_SIGNING_KEYSTORE_B64 is not set"; exit 1; }
@@ -146,11 +151,19 @@ jobs:
           # Standard Android debug-key alias and passwords; the keystore itself is the secret.
           printf 'storeFile=%s\nstorePassword=android\nkeyAlias=androiddebugkey\nkeyPassword=android\n' \
             "$key" > android/key.properties
-          build_args=()
-          if [ -n "${{ inputs.build_number }}" ]; then
-            build_args+=(--build-number "${{ inputs.build_number }}")
+          # The TV refuses a lower build number. A rollback build (edtv-rollback-N) sits
+          # above upstream's number, so later normal builds must go above it too.
+          if [ -n "${IN_BUILD:-}" ]; then
+            build="$IN_BUILD"
+          else
+            up=$(sed -n 's/^version: .*+\([0-9][0-9]*\)$/\1/p' pubspec.yaml)
+            [[ "$up" =~ ^[0-9]+$ ]] || { echo "No build number in pubspec.yaml"; exit 1; }
+            rb=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName \
+              --jq '[.[].tagName | select(startswith("edtv-rollback-")) | ltrimstr("edtv-rollback-") | tonumber] | max // 0')
+            build=$(( up > rb ? up : rb + 1 ))
           fi
-          flutter build apk --release --target-platform android-arm "${build_args[@]}"
+          echo "build number: $build"
+          flutter build apk --release --target-platform android-arm --build-number "$build"
           rm -f android/key.properties "$key"
           apk="$RUNNER_TEMP/openiptv-$RELEASE-armv7.apk"
           cp build/app/outputs/flutter-apk/app-release.apk "$apk"
