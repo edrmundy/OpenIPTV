@@ -9,6 +9,12 @@
 # owner), with the details in the run summary, and nothing is published. Installing on the TV stays a local step (EDTV's
 # scripts/openiptv-update.sh).
 #
+# Rollback: the TV refuses a downgrade (release builds are not debuggable), so
+# a rollback is the older bridge rebuilt with a higher build number. Run the
+# workflow by hand with `ref` set to a previous bridge (tags
+# edtv-bridge-on-<tag> keep each one) and `build_number` above the installed
+# build. It publishes edtv-rollback-<build number> and leaves edtv/bridge alone.
+#
 # Secret: EDTV_SIGNING_KEYSTORE_B64 is the base64 of the debug keystore that
 # signed the installed app (standard debug alias and passwords).
 name: EDTV bridge build
@@ -22,6 +28,14 @@ on:
         description: "Build even if a release for the upstream tag already exists"
         type: boolean
         default: false
+      ref:
+        description: "Rollback only: build this ref as it is (no rebase)"
+        type: string
+        default: ""
+      build_number:
+        description: "Rollback only: build number, above the one on the TV"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -45,7 +59,7 @@ jobs:
       - name: Check out the bridge branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.BRIDGE }}
+          ref: ${{ inputs.ref || env.BRIDGE }}
           fetch-depth: 0
 
       - name: Decide what to build
@@ -57,6 +71,12 @@ jobs:
           latest=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
           base=$(git describe --tags --abbrev=0 --match 'v*' HEAD)
           release="edtv-$latest"
+          if [ -n "${{ inputs.ref }}" ]; then
+            # Rollback: build the given ref unchanged, under a new build number.
+            [ -n "${{ inputs.build_number }}" ] || { echo "A rollback needs build_number"; exit 1; }
+            latest=$base
+            release="edtv-rollback-${{ inputs.build_number }}"
+          fi
           echo "upstream=$latest base=$base release=$release"
           if gh release view "$release" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
               && [ "${{ inputs.force }}" != "true" ]; then
@@ -126,7 +146,11 @@ jobs:
           # Standard Android debug-key alias and passwords; the keystore itself is the secret.
           printf 'storeFile=%s\nstorePassword=android\nkeyAlias=androiddebugkey\nkeyPassword=android\n' \
             "$key" > android/key.properties
-          flutter build apk --release --target-platform android-arm
+          build_args=()
+          if [ -n "${{ inputs.build_number }}" ]; then
+            build_args+=(--build-number "${{ inputs.build_number }}")
+          fi
+          flutter build apk --release --target-platform android-arm "${build_args[@]}"
           rm -f android/key.properties "$key"
           apk="$RUNNER_TEMP/openiptv-$RELEASE-armv7.apk"
           cp build/app/outputs/flutter-apk/app-release.apk "$apk"
