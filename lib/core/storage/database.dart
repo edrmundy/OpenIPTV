@@ -798,6 +798,7 @@ class AppDatabase extends _$AppDatabase {
       totalDuration: p.totalDurationSeconds != null
           ? Duration(seconds: p.totalDurationSeconds!)
           : null,
+      lastWatchedAt: p.lastWatchedAt,
     );
   }
 
@@ -811,6 +812,7 @@ class AppDatabase extends _$AppDatabase {
       totalDuration: p.totalDurationSeconds != null
           ? Duration(seconds: p.totalDurationSeconds!)
           : null,
+      lastWatchedAt: p.lastWatchedAt,
     );
   }
 

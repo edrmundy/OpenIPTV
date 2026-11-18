@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:open_iptv/core/models/profile.dart';
 import 'package:open_iptv/core/services/category_order.dart';
+import 'package:open_iptv/core/services/edtv_queue_bridge.dart';
 import 'package:open_iptv/core/storage/database.dart';
 import 'package:open_iptv/core/storage/preferences.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -132,6 +133,10 @@ class ProfileService {
     }
 
     await prefs?.setActiveProfileId(id);
+    final currentPrefs = prefs;
+    if (currentPrefs != null) {
+      await EdtvQueueBridge.publish(db, profile, currentPrefs);
+    }
     return true;
   }
 
@@ -183,10 +188,16 @@ class ProfileService {
     } else {
       favs.add(channelId);
     }
-    await db.upsertProfile(
-      profile.copyWith(favoriteChannelIds: favs, updatedAt: DateTime.now()),
-    );
+    final updated =
+        profile.copyWith(favoriteChannelIds: favs, updatedAt: DateTime.now());
+    await db.upsertProfile(updated);
     onFavoritesChanged?.call();
+    // EDTV shows these as its Live TV row: publish now, while the app is in
+    // front, instead of relying on the pause hook that runs as it leaves.
+    final currentPrefs = prefs;
+    if (currentPrefs != null) {
+      await EdtvQueueBridge.publish(db, updated, currentPrefs);
+    }
   }
 
   Future<void> toggleFavoriteMovie(String profileId, String movieId) async {

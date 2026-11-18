@@ -24,6 +24,7 @@ import 'package:open_iptv/core/services/epg_service.dart';
 import 'package:open_iptv/core/services/native_video_player.dart';
 import 'package:open_iptv/core/services/now_playing_service.dart';
 import 'package:open_iptv/core/services/playback_service.dart';
+import 'package:open_iptv/core/services/edtv_queue_bridge.dart';
 import 'package:open_iptv/core/services/profile_service.dart';
 import 'package:open_iptv/features/player/channel_switcher.dart';
 import 'package:open_iptv/features/player/multi_view.dart';
@@ -940,8 +941,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         !_lockedContent &&
         widget.contentId != null &&
         profileId != null) {
-      unawaited(_playbackService.db
-          .updateChannelLastWatched(profileId, widget.contentId!));
+      unawaited(() async {
+        await _playbackService.db
+            .updateChannelLastWatched(profileId, widget.contentId!);
+        // EDTV launcher: its Live TV row reads recently watched channels.
+        final prefs = ref.read(appPreferencesProvider).value;
+        if (prefs != null) {
+          await EdtvQueueBridge.publishForProfile(
+              _playbackService.db, profileId, prefs);
+        }
+      }());
     }
 
     // Show resume dialog if there is a saved position and user didn't
