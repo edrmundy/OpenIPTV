@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:open_iptv/core/services/buffer_preset.dart';
+import 'package:open_iptv/core/services/edtv_queue_bridge.dart';
 import 'package:open_iptv/core/services/native_video_player.dart';
 import 'package:open_iptv/core/services/profile_service.dart';
 import 'package:open_iptv/core/storage/database.dart';
@@ -21,6 +22,7 @@ PlaybackService playbackService(Ref ref) {
     bufferPreset: () => BufferPreset.fromId(
         ref.read(appPreferencesProvider).value?.bufferPreset),
     userAgent: () => ref.read(appPreferencesProvider).value?.userAgent,
+    prefsGetter: () => ref.read(appPreferencesProvider).value,
   );
   ref.onDispose(service.dispose);
   return service;
@@ -30,15 +32,19 @@ class PlaybackService {
   PlaybackService(
       {required this.db,
       BufferPreset Function()? bufferPreset,
-      String? Function()? userAgent})
+      String? Function()? userAgent,
+      AppPreferences? Function()? prefsGetter})
       : _bufferPreset = bufferPreset ?? (() => BufferPreset.fast),
-        _userAgent = userAgent ?? (() => null) {
+        _userAgent = userAgent ?? (() => null),
+        _prefsGetter = prefsGetter ?? (() => null) {
     _stateSub = _player.stateStream.listen((s) => _lastState = s);
   }
 
   final AppDatabase db;
   final BufferPreset Function() _bufferPreset;
   final String? Function() _userAgent;
+  // EDTV launcher: refreshes its read-only Continue Watching snapshot after a save.
+  final AppPreferences? Function() _prefsGetter;
 
   /// The user's own user agent for streams, or null for the app's (Power
   /// User Tools).
@@ -255,6 +261,11 @@ class PlaybackService {
   // Progress persistence (VOD)
   // ---------------------------------------------------------------------------
 
+  Future<void> _publishEdtvQueue(String profileId) async {
+    final prefs = _prefsGetter();
+    if (prefs != null) await EdtvQueueBridge.publishForProfile(db, profileId, prefs);
+  }
+
   Future<void> saveMovieProgress(
       String profileId, String movieId, Duration position, Duration total) async {
     debugPrint('[OTV-save] saveMovieProgress: pos=${position.inSeconds}s total=${total.inSeconds}s');
@@ -263,6 +274,7 @@ class PlaybackService {
       return;
     }
     await db.updateMovieProgress(profileId, movieId, position, total);
+    await _publishEdtvQueue(profileId);
     debugPrint('[OTV-save] updateMovieProgress done');
   }
 
@@ -274,6 +286,7 @@ class PlaybackService {
       return;
     }
     await db.updateEpisodeProgress(profileId, episodeId, position, total);
+    await _publishEdtvQueue(profileId);
     debugPrint('[OTV-save] updateEpisodeProgress done');
   }
 
