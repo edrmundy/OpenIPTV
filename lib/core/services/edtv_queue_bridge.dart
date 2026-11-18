@@ -88,6 +88,8 @@ class EdtvQueueBridge {
         }
       }
 
+      // Decoded picture sizes of items played here ("WIDTHxHEIGHT"), for EDTV's HD/UHD label.
+      final videoSizes = prefs.videoSizes;
       final items = <Map<String, Object?>>[];
       for (final Movie movie in movies) {
         if (!movie.isInProgress ||
@@ -104,6 +106,7 @@ class EdtvQueueBridge {
           'artwork': movie.posterUrl ?? '',
           'positionMs': movie.watchedDuration?.inMilliseconds ?? 0,
           'durationMs': movie.totalDuration?.inMilliseconds ?? 0,
+          'videoSize': videoSizes[movie.id] ?? '',
           'timestamp': movie.lastWatchedAt?.millisecondsSinceEpoch ?? 0,
         });
       }
@@ -131,6 +134,7 @@ class EdtvQueueBridge {
           'artwork': series?.posterUrl ?? '',
           'positionMs': episode.watchedDuration?.inMilliseconds ?? 0,
           'durationMs': episode.totalDuration?.inMilliseconds ?? 0,
+          'videoSize': videoSizes[episode.id] ?? '',
           'timestamp': episode.lastWatchedAt?.millisecondsSinceEpoch ?? 0,
         });
       }

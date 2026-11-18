@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:open_iptv/ui/platform_helper.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -59,6 +61,7 @@ const _kGuideHighlight = 'guide_highlight_playing';
 const _kChannelCustom = 'channel_custom'; // per profile: hidden channels, names
 const _kSeekKeys = 'seek_keys'; // which remote keys seek in catch-up / movies
 const _kAudioDelayMs = 'audio_delay_ms'; // lip-sync shift
+const _kVideoSizes = 'edtv_video_sizes';
 const _kStreamDetails = 'stream_details'; // resolution/fps/audio badges
 const _kLastChannelOnStart = 'last_channel_on_start';
 const _kBufferPreset = 'buffer_preset'; // see BufferPreset ids
@@ -330,6 +333,35 @@ class AppPreferences {
 
   int get audioDelayMs => _prefs.getInt(_kAudioDelayMs) ?? 0;
   Future<void> setAudioDelayMs(int v) => _prefs.setInt(_kAudioDelayMs, v);
+
+  /// The picture size the player decoded for items played, "WIDTHxHEIGHT"
+  /// by item id, newest last. The EDTV launcher reads it for its HD/UHD label.
+  Map<String, String> get videoSizes {
+    final raw = _prefs.getString(_kVideoSizes);
+    if (raw == null || raw.isEmpty) return const {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return const {};
+      return {
+        for (final e in decoded.entries)
+          if (e.value is String) '${e.key}': e.value as String,
+      };
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// Remembers a played item's decoded size. Keeps the newest 200 items.
+  Future<void> setVideoSize(String itemId, int width, int height) async {
+    if (itemId.isEmpty || width <= 0 || height <= 0) return;
+    final sizes = Map<String, String>.from(videoSizes);
+    sizes.remove(itemId);
+    sizes[itemId] = '${width}x$height';
+    while (sizes.length > 200) {
+      sizes.remove(sizes.keys.first);
+    }
+    await _prefs.setString(_kVideoSizes, jsonEncode(sizes));
+  }
 
   bool get streamDetails => _prefs.getBool(_kStreamDetails) ?? true;
   Future<void> setStreamDetails(bool v) => _prefs.setBool(_kStreamDetails, v);
