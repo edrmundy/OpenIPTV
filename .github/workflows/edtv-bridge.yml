@@ -154,6 +154,7 @@ jobs:
           # The TV refuses a lower build number. A rollback build (edtv-rollback-N) sits
           # above upstream's number, so later normal builds must go above it too.
           if [ -n "${IN_BUILD:-}" ]; then
+            [[ "$IN_BUILD" =~ ^[0-9]+$ ]] || { echo "build_number must be a number"; exit 1; }
             build="$IN_BUILD"
           else
             up=$(sed -n 's/^version: .*+\([0-9][0-9]*\)$/\1/p' pubspec.yaml)
