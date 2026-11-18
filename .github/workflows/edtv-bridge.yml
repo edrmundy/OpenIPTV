@@ -36,6 +36,10 @@ on:
         description: "Rollback only: build number, above the one on the TV"
         type: string
         default: ""
+      allow_schema_change:
+        description: "Allow a new upstream release that raises the database schema version (a one-way upgrade on the TV)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -114,6 +118,32 @@ jobs:
           fi
           git log --oneline "$LATEST..HEAD"
 
+      - name: Database schema check
+        id: schema
+        if: steps.plan.outputs.skip == 'false' && steps.plan.outputs.base != steps.plan.outputs.latest
+        env:
+          LATEST: ${{ steps.plan.outputs.latest }}
+          BASE: ${{ steps.plan.outputs.base }}
+          ALLOW: ${{ inputs.allow_schema_change }}
+        run: |
+          set -euo pipefail
+          # OpenIPTV upgrades its database on first start, and a downgrade is impossible (the TV
+          # refuses an older build and an uninstall deletes the data). So a release that raises the
+          # schema version is one-way: stop here, before anything is published or force-pushed,
+          # unless the run was started by hand with allow_schema_change.
+          ver() { git show "$1:lib/core/storage/database.dart" | sed -n 's/.*int get schemaVersion => \([0-9][0-9]*\);.*/\1/p' | head -1; }
+          old=$(ver "$BASE"); new=$(ver "$LATEST")
+          [[ "$old" =~ ^[0-9]+$ && "$new" =~ ^[0-9]+$ ]] || { echo "Cannot read the database schema version ($old -> $new); stopping to be safe."; exit 1; }
+          echo "note=Database schema: $old -> $new" >> "$GITHUB_OUTPUT"
+          if [ "$old" != "$new" ]; then
+            if [ "${ALLOW:-false}" != "true" ]; then
+              printf '### Database upgrade needs approval\n\nUpstream %s raises the OpenIPTV database schema from %s to %s. The upgrade runs on the TV at first start and cannot be undone.\n\nNothing was merged or published. Back up the TV, then run this workflow by hand with allow_schema_change.\n' \
+                "$LATEST" "$old" "$new" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "Schema change $old -> $new allowed by hand."
+          fi
+
       - name: Set up Java
         if: steps.plan.outputs.skip == 'false'
         uses: actions/setup-java@v4
@@ -186,6 +216,7 @@ jobs:
           LATEST: ${{ steps.plan.outputs.latest }}
           BASE: ${{ steps.plan.outputs.base }}
           RELEASE: ${{ steps.plan.outputs.release }}
+          SCHEMA_NOTE: ${{ steps.schema.outputs.note }}
         run: |
           set -euo pipefail
           if [ "$BASE" != "$LATEST" ]; then
@@ -196,6 +227,7 @@ jobs:
           fi
           notes=$(printf 'Upstream %s with the EDTV bridge (fork-only).\n\nBridge commits:\n%s\n\n%s\n\nInstall on the TV with EDTV'"'"'s `scripts/openiptv-update.sh`.' \
             "$LATEST" "$(git log --format='- %s' "$LATEST..HEAD")" "$(flutter --version | head -1)")
+          notes=$(printf '%s\n\n%s' "$notes" "${SCHEMA_NOTE:-Database schema: unchanged}")
           gh release delete "$RELEASE" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$RELEASE" "$APK" "$APK.sha256" \
             --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
