@@ -1158,7 +1158,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   void _saveProgressIfNeeded() {
-    if (_isLive) return;
+    if (_isLive || !_playbackStarted || _casting) return;
     // Completion already saved 100% — don't overwrite with stale position.
     if (_completionSaved) return;
     final id = widget.contentId;
@@ -1167,11 +1167,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     // reading _playbackService.lastState.position directly — the latter can be zero
     // if a reconnection attempt called play() and the seek hasn't
     // completed yet.
+    // Some TV decoders send sparse state events: take the player's own clock
+    // too, so a resumed title is not saved at 0:00.
+    final current = _playbackService.lastState;
+    if (current.position > _lastKnownPosition) {
+      _lastKnownPosition = current.position;
+    }
+    if (current.duration > _lastKnownDuration) {
+      _lastKnownDuration = current.duration;
+    }
     final position = _lastKnownPosition;
     // Prefer the stream-tracked duration; fall back to the last known state.
     final total = _lastKnownDuration > Duration.zero
         ? _lastKnownDuration
-        : _playbackService.lastState.duration;
+        : current.duration;
     debugPrint(
         '[OTV-save] type=${widget.contentType} id=$id pos=${position.inSeconds}s total=${total.inSeconds}s');
     final profileId = _profileId;
