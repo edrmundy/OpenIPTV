@@ -147,6 +147,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   // reconnection (which temporarily resets state.position to zero) doesn't
   // corrupt the progress save on dispose.
   Duration _lastKnownPosition = Duration.zero;
+  // EDTV launcher: the decoded picture size is saved once, at the first frame.
+  bool _videoSizeSaved = false;
   Duration _lastKnownDuration = Duration.zero;
 
   // Set true once completion has been handled to prevent double-firing
@@ -363,6 +365,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       if (!_isPlainLive) {
         if (s.position > Duration.zero) _lastKnownPosition = s.position;
         if (s.duration > Duration.zero) _lastKnownDuration = s.duration;
+        // EDTV launcher: remember the decoded size as soon as a picture is up, not
+        // only when progress is saved at exit, which a short play or an abrupt end can miss.
+        if (!_videoSizeSaved && s.videoWidth > 0 && s.videoHeight > 0) {
+          _videoSizeSaved = true;
+          final id = widget.contentId;
+          final prefs = ref.read(appPreferencesProvider).value;
+          if (id != null &&
+              prefs != null &&
+              (widget.contentType == 'movie' ||
+                  widget.contentType == 'episode')) {
+            unawaited(prefs.setVideoSize(id, s.videoWidth, s.videoHeight));
+          }
+        }
         if (!_completionHandled) {
           final remaining = _lastKnownDuration - s.position;
           final nearEnd = _lastKnownDuration > Duration.zero &&
