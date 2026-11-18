@@ -17,6 +17,7 @@ import io.flutter.embedding.android.RenderMode
 import io.flutter.embedding.android.TransparencyMode
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
 
 // Extends AudioServiceActivity (not FlutterActivity) so the Flutter engine is
 // shared with the background audio_service, keeping the Now Playing
@@ -25,6 +26,7 @@ class MainActivity : AudioServiceActivity() {
     private var pipChannel: MethodChannel? = null
     private var backChannel: MethodChannel? = null
     private var updatesChannel: MethodChannel? = null
+    private var edtvChannel: MethodChannel? = null
     private var castController: CastController? = null
     private var vpnController: VpnController? = null
 
@@ -58,13 +60,41 @@ class MainActivity : AudioServiceActivity() {
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
+        captureEdtvResume(intent)
         VideoLayerMode.activeAtStart = videoLayerDevice
         if (videoLayerDevice) VideoLayer.attach(this)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureEdtvResume(intent)
+        edtvChannel?.invokeMethod("pendingResumeAvailable", null)
+    }
+
+    /**
+     * EDTV launcher: keeps an "open this item" request (identity and resume hint only, never a
+     * stream URL) for the app to resolve and play itself. Playback stays fully with OpenIPTV.
+     */
+    private fun captureEdtvResume(intent: Intent?) {
+        if (intent?.action != "com.openiptv.app.EDTV_RESUME") return
+        val id = intent.getStringExtra("contentId") ?: return
+        val type = intent.getStringExtra("contentType") ?: return
+        if (type !in setOf("live", "movie", "episode")) return
+        val payload = JSONObject()
+            .put("contentId", id)
+            .put("contentType", type)
+            .put("seriesId", intent.getStringExtra("seriesId"))
+            .put("resumePositionMs", intent.getLongExtra("resumePositionMs", 0L).coerceAtLeast(0L))
+        getSharedPreferences("edtv_bridge", Context.MODE_PRIVATE).edit()
+            .putString("pending_resume", payload.toString())
+            .apply()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         FrameRateMatcher.attach(this)
         super.configureFlutterEngine(flutterEngine)
+        edtvChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "openiptv/edtv")
         pipChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "openiptv/pip")
         pipChannel?.setMethodCallHandler { call, result ->
             when (call.method) {

@@ -10,6 +10,7 @@ class Episode {
     this.stillUrl,
     this.watchedDuration,
     this.totalDuration,
+    this.lastWatchedAt,
   });
 
   final String id;
@@ -22,6 +23,7 @@ class Episode {
   final String? stillUrl;
   final Duration? watchedDuration;
   final Duration? totalDuration;
+  final DateTime? lastWatchedAt;
 
   bool get isWatched {
     if (watchedDuration == null || totalDuration == null) return false;
@@ -64,6 +66,7 @@ class Episode {
     String? stillUrl,
     Duration? watchedDuration,
     Duration? totalDuration,
+    DateTime? lastWatchedAt,
   }) {
     return Episode(
       id: id ?? this.id,
@@ -76,6 +79,7 @@ class Episode {
       stillUrl: stillUrl ?? this.stillUrl,
       watchedDuration: watchedDuration ?? this.watchedDuration,
       totalDuration: totalDuration ?? this.totalDuration,
+      lastWatchedAt: lastWatchedAt ?? this.lastWatchedAt,
     );
   }
 }

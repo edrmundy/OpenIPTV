@@ -11,6 +11,7 @@ class Movie {
     this.description,
     this.watchedDuration,
     this.totalDuration,
+    this.lastWatchedAt,
   });
 
   final String id;
@@ -24,6 +25,7 @@ class Movie {
   final String? description;
   final Duration? watchedDuration;
   final Duration? totalDuration;
+  final DateTime? lastWatchedAt;
 
   bool get isWatched {
     if (watchedDuration == null || totalDuration == null) return false;
@@ -54,6 +56,7 @@ class Movie {
     String? description,
     Duration? watchedDuration,
     Duration? totalDuration,
+    DateTime? lastWatchedAt,
   }) {
     return Movie(
       id: id ?? this.id,
@@ -67,6 +70,7 @@ class Movie {
       description: description ?? this.description,
       watchedDuration: watchedDuration ?? this.watchedDuration,
       totalDuration: totalDuration ?? this.totalDuration,
+      lastWatchedAt: lastWatchedAt ?? this.lastWatchedAt,
     );
   }
 }
