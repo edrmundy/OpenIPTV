@@ -77,15 +77,26 @@ jobs:
           git remote add upstream "https://github.com/$UPSTREAM.git"
           git fetch --quiet --tags upstream
           latest=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
-          base=$(git describe --tags --abbrev=0 --match 'v*' HEAD)
+          # The bridge's upstream base is where it joins the upstream release, not the
+          # nearest v* tag: upstream deletes old tags, so the nearest one can be stale.
+          base=$(git merge-base HEAD "$latest^{commit}")
+          base_name=$(git describe --tags --exact-match --match 'v*' "$base" 2>/dev/null \
+            || git rev-parse --short=12 "$base")
+          latest_name=$latest
           release="edtv-$latest"
+          replay=true
+          [ "$base" = "$(git rev-parse "$latest^{commit}")" ] && replay=false
           if [ -n "${IN_REF:-}" ]; then
             # Rollback: build the given ref unchanged, under a new build number.
             [[ "${IN_BUILD:-}" =~ ^[0-9]+$ ]] || { echo "A rollback needs a numeric build_number"; exit 1; }
             latest=$base
+            latest_name=$base_name
             release="edtv-rollback-$IN_BUILD"
+            replay=false
           fi
-          echo "upstream=$latest base=$base release=$release"
+          echo "upstream=$latest_name base=$base_name ($base) replay=$replay release=$release"
+          echo "Bridge commits to replay:"
+          git log --oneline "$base..HEAD" --not "$latest^{commit}" || true
           if gh release view "$release" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
               && [ "${IN_FORCE:-false}" != "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -96,14 +107,18 @@ jobs:
             echo "skip=false"
             echo "latest=$latest"
             echo "base=$base"
+            echo "base_name=$base_name"
+            echo "latest_name=$latest_name"
+            echo "replay=$replay"
             echo "release=$release"
           } >> "$GITHUB_OUTPUT"
 
       - name: Replay the bridge on the new release
-        if: steps.plan.outputs.skip == 'false' && steps.plan.outputs.base != steps.plan.outputs.latest
+        if: steps.plan.outputs.skip == 'false' && steps.plan.outputs.replay == 'true'
         env:
           LATEST: ${{ steps.plan.outputs.latest }}
           BASE: ${{ steps.plan.outputs.base }}
+          BASE_NAME: ${{ steps.plan.outputs.base_name }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -113,14 +128,14 @@ jobs:
             commit=$(git log -1 --format='%h %s' REBASE_HEAD 2>/dev/null || true)
             git rebase --abort
             printf '### The bridge does not replay on %s\n\nIt was on %s. Stopped at: %s\n\nConflicting files:\n%s\n' \
-              "$LATEST" "$BASE" "$commit" "$files" >> "$GITHUB_STEP_SUMMARY"
+              "$LATEST" "$BASE_NAME" "$commit" "$files" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           git log --oneline "$LATEST..HEAD"
 
       - name: Database schema check
         id: schema
-        if: steps.plan.outputs.skip == 'false' && steps.plan.outputs.base != steps.plan.outputs.latest
+        if: steps.plan.outputs.skip == 'false' && steps.plan.outputs.replay == 'true'
         env:
           LATEST: ${{ steps.plan.outputs.latest }}
           BASE: ${{ steps.plan.outputs.base }}
@@ -214,21 +229,23 @@ jobs:
         if: steps.plan.outputs.skip == 'false'
         env:
           LATEST: ${{ steps.plan.outputs.latest }}
-          BASE: ${{ steps.plan.outputs.base }}
+          LATEST_NAME: ${{ steps.plan.outputs.latest_name }}
+          BASE_NAME: ${{ steps.plan.outputs.base_name }}
+          REPLAY: ${{ steps.plan.outputs.replay }}
           RELEASE: ${{ steps.plan.outputs.release }}
           SCHEMA_NOTE: ${{ steps.schema.outputs.note }}
         run: |
           set -euo pipefail
-          if [ "$BASE" != "$LATEST" ]; then
+          if [ "$REPLAY" = "true" ]; then
             # Keep the previous bridge reachable for a rollback.
-            git tag -f "edtv-bridge-on-$BASE" "origin/$BRIDGE"
-            git push origin "refs/tags/edtv-bridge-on-$BASE"
+            git tag -f "edtv-bridge-on-$BASE_NAME" "origin/$BRIDGE"
+            git push origin "refs/tags/edtv-bridge-on-$BASE_NAME"
             git push --force-with-lease="$BRIDGE:origin/$BRIDGE" origin "HEAD:refs/heads/$BRIDGE"
           fi
           notes=$(printf 'Upstream %s with the EDTV bridge (fork-only).\n\nBridge commits:\n%s\n\n%s\n\nInstall on the TV with EDTV'"'"'s `scripts/openiptv-update.sh`.' \
-            "$LATEST" "$(git log --format='- %s' "$LATEST..HEAD")" "$(flutter --version | head -1)")
+            "$LATEST_NAME" "$(git log --format='- %s' "$LATEST..HEAD")" "$(flutter --version | head -1)")
           notes=$(printf '%s\n\n%s' "$notes" "${SCHEMA_NOTE:-Database schema: unchanged}")
           gh release delete "$RELEASE" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$RELEASE" "$APK" "$APK.sha256" \
             --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
-            --title "OpenIPTV $LATEST + EDTV bridge" --notes "$notes"
+            --title "OpenIPTV $LATEST_NAME + EDTV bridge" --notes "$notes"
